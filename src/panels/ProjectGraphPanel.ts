@@ -1,7 +1,8 @@
 // src/panels/ProjectGraphPanel.ts
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { generateOnboardingPath, scanProject } from '../parser/projectScanner';
+import { scanProject } from '../parser/projectScanner';
+import { generateOnboardingPath } from '../parser/projectScanner';
 
 export class ProjectGraphPanel {
   public static currentPanel: ProjectGraphPanel | undefined;
@@ -12,12 +13,10 @@ export class ProjectGraphPanel {
 
   public static createOrShow(extensionUri: vscode.Uri, rootPath: string) {
     const column = vscode.ViewColumn.One;
-
     if (ProjectGraphPanel.currentPanel) {
       ProjectGraphPanel.currentPanel._panel.reveal(column);
       return;
     }
-
     const panel = vscode.window.createWebviewPanel(
       'codemapProjectGraph',
       'CodeMap: Project Overview',
@@ -28,7 +27,6 @@ export class ProjectGraphPanel {
         retainContextWhenHidden: true,
       }
     );
-
     ProjectGraphPanel.currentPanel = new ProjectGraphPanel(panel, rootPath);
   }
 
@@ -46,13 +44,13 @@ export class ProjectGraphPanel {
       const result = scanProject(this._rootPath);
       const onboardingPath = generateOnboardingPath(result);
 
+      // ── Folder color palette ──────────────────────────────
       const folderColors: Record<string, string> = {};
       const palette = [
         '#5e9bde', '#a78bfa', '#34d399', '#fb923c',
         '#f472b6', '#38bdf8', '#facc15', '#a3e635',
       ];
       let colorIdx = 0;
-
       const getColor = (folder: string) => {
         if (!folderColors[folder]) {
           folderColors[folder] = palette[colorIdx % palette.length];
@@ -61,18 +59,32 @@ export class ProjectGraphPanel {
         return folderColors[folder];
       };
 
+      // ── Build nodes ───────────────────────────────────────
       const nodes: Array<{
         id: string; label: string; type: 'file' | 'function';
-        file?: string; group: string; color: string; fnCount?: number;
+        file?: string; group: string; color: string;
+        fnCount?: number; complexity?: number;
+        fanIn?: number; fanOut?: number;
       }> = [];
 
       const links: Array<{ source: string; target: string; type: string }> = [];
 
       for (const file of result.files) {
         const relPath = path.relative(this._rootPath, file.filePath);
-        const folder = path.dirname(relPath);
-        const group = folder === '.' ? 'root' : folder;
-        const color = getColor(group);
+        const folder  = path.dirname(relPath);
+        const group   = folder === '.' ? 'root' : folder;
+        const color   = getColor(group);
+
+        // Calculate complexity for this file
+        const fileFanIn  = result.callEdges.filter(e => {
+          const toFile = result.files.find(f => f.functions.some(fn => fn.id === e.to));
+          return toFile?.filePath === file.filePath;
+        }).length;
+        const fileFanOut = result.callEdges.filter(e => {
+          const fromFile = result.files.find(f => f.functions.some(fn => fn.id === e.from));
+          return fromFile?.filePath === file.filePath;
+        }).length;
+        const complexity = fileFanIn + fileFanOut + file.functions.length;
 
         nodes.push({
           id: file.filePath,
@@ -81,6 +93,9 @@ export class ProjectGraphPanel {
           group,
           color,
           fnCount: file.functions.length,
+          complexity,
+          fanIn: fileFanIn,
+          fanOut: fileFanOut,
         });
 
         for (const fn of file.functions) {
@@ -128,7 +143,7 @@ export class ProjectGraphPanel {
     stats: { totalFiles: number; totalFunctions: number; totalCalls: number; parseErrors: number },
     graphDataJson: string,
     legendJson: string,
-    onboardingJson: string 
+    onboardingJson: string
   ): string {
     return /* html */`
 <!DOCTYPE html>
@@ -137,13 +152,9 @@ export class ProjectGraphPanel {
   <meta charset="UTF-8"/>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: #0f0f1a;
-      color: #e2e8f0;
-      font-family: 'Segoe UI', sans-serif;
-      overflow: hidden;
-      height: 100vh;
-    }
+    body { background: #0f0f1a; color: #e2e8f0; font-family: 'Segoe UI', sans-serif; overflow: hidden; height: 100vh; }
+
+    /* ── Header ── */
     #header {
       position: fixed; top: 0; left: 0; right: 0; z-index: 100;
       height: 52px;
@@ -163,16 +174,36 @@ export class ProjectGraphPanel {
     }
     .stat-pill strong { color: #e2e8f0; font-weight: 600; }
     .stat-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+
+    /* ── Header Buttons ── */
+    #onboarding-btn, #heatmap-btn {
+      border-radius: 20px; padding: 5px 14px;
+      font-size: 12px; font-weight: 600;
+      cursor: pointer; transition: all 0.2s; white-space: nowrap;
+    }
     #onboarding-btn {
       margin-left: auto;
       background: linear-gradient(135deg, rgba(167,139,250,0.15), rgba(94,155,222,0.15));
       border: 1px solid rgba(167,139,250,0.35);
-      border-radius: 20px; padding: 5px 14px;
-      color: #a78bfa; font-size: 12px; font-weight: 600;
-      cursor: pointer; transition: all 0.2s; white-space: nowrap;
+      color: #a78bfa;
     }
-    #onboarding-btn:hover { background: linear-gradient(135deg, rgba(167,139,250,0.3), rgba(94,155,222,0.3)); }
-    #onboarding-btn.active { background: linear-gradient(135deg, rgba(167,139,250,0.4), rgba(94,155,222,0.4)); border-color: #a78bfa; }
+    #onboarding-btn:hover, #onboarding-btn.active {
+      background: linear-gradient(135deg, rgba(167,139,250,0.35), rgba(94,155,222,0.35));
+      border-color: #a78bfa;
+    }
+    #heatmap-btn {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      color: #94a3b8;
+    }
+    #heatmap-btn:hover { background: rgba(255,255,255,0.1); color: #e2e8f0; }
+    #heatmap-btn.active {
+      background: linear-gradient(135deg, rgba(248,113,60,0.25), rgba(250,204,21,0.25));
+      border-color: rgba(248,113,60,0.5);
+      color: #fb923c;
+    }
+
+    /* ── Search ── */
     #search-wrap { position: fixed; top: 64px; left: 16px; z-index: 100; }
     #search {
       background: rgba(15,15,26,0.92);
@@ -182,6 +213,8 @@ export class ProjectGraphPanel {
     }
     #search:focus { border-color: #89b4fa; }
     #search::placeholder { color: #475569; }
+
+    /* ── Zoom Controls ── */
     #controls {
       position: fixed; top: 64px; right: 16px; z-index: 100;
       display: flex; flex-direction: column; gap: 6px;
@@ -196,6 +229,8 @@ export class ProjectGraphPanel {
       transition: all 0.15s;
     }
     .ctrl-btn:hover { background: rgba(137,180,250,0.15); color: #89b4fa; border-color: rgba(137,180,250,0.4); }
+
+    /* ── Folder Legend ── */
     #legend {
       position: fixed; bottom: 16px; left: 16px; z-index: 100;
       background: rgba(15,15,26,0.92);
@@ -207,6 +242,26 @@ export class ProjectGraphPanel {
     .legend-row { display: flex; align-items: center; gap: 8px; margin: 5px 0; font-size: 11px; color: #94a3b8; }
     .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
     .legend-sep { height: 1px; background: rgba(255,255,255,0.06); margin: 8px 0; }
+
+    /* ── Heatmap Legend ── */
+    #heatmap-legend {
+      position: fixed; bottom: 16px; right: 60px; z-index: 100;
+      background: rgba(15,15,26,0.92);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 12px; padding: 12px 16px;
+      display: none;
+    }
+    #heatmap-legend h4 { font-size: 10px; font-weight: 600; color: #475569; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px; }
+    .heat-scale {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+    }
+    .heat-bar {
+      width: 100px; height: 8px; border-radius: 4px;
+      background: linear-gradient(to right, #34d399, #facc15, #f87171);
+    }
+    .heat-label { font-size: 10px; color: #94a3b8; }
+
+    /* ── Onboarding Panel ── */
     #onboarding-panel {
       position: fixed; right: 0; top: 52px; bottom: 0;
       width: 300px; z-index: 150;
@@ -220,9 +275,8 @@ export class ProjectGraphPanel {
     #onboarding-header {
       padding: 16px 20px;
       border-bottom: 1px solid rgba(255,255,255,0.06);
-      display: flex; flex-direction: column; gap: 4px;
     }
-    #onboarding-header-row { display: flex; align-items: center; justify-content: space-between; }
+    #onboarding-header-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
     #onboarding-title { font-size: 14px; font-weight: 700; color: #a78bfa; }
     #onboarding-subtitle { font-size: 11px; color: #475569; }
     #close-onboarding { background: none; border: none; color: #475569; font-size: 20px; cursor: pointer; padding: 0; line-height: 1; }
@@ -247,6 +301,8 @@ export class ProjectGraphPanel {
     .step-reason { font-size: 11px; color: #64748b; line-height: 1.5; padding-left: 32px; }
     .step-tags { display: flex; gap: 6px; margin-top: 5px; padding-left: 32px; }
     .step-tag { font-size: 10px; border-radius: 4px; padding: 2px 7px; }
+
+    /* ── Tooltip ── */
     #tooltip {
       position: fixed; z-index: 200;
       background: rgba(15,15,26,0.97);
@@ -254,19 +310,21 @@ export class ProjectGraphPanel {
       border-radius: 10px; padding: 10px 14px;
       pointer-events: none; opacity: 0;
       transition: opacity 0.12s;
-      min-width: 160px; max-width: 240px;
+      min-width: 160px; max-width: 260px;
       box-shadow: 0 8px 32px rgba(0,0,0,0.5);
     }
     .tt-type { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 4px; }
     .tt-name { font-size: 13px; font-weight: 600; color: #e2e8f0; margin-bottom: 4px; word-break: break-all; }
-    .tt-meta { font-size: 11px; color: #64748b; }
+    .tt-meta { font-size: 11px; color: #64748b; line-height: 1.6; }
     .tt-badge { display: inline-block; margin-top: 6px; border-radius: 4px; padding: 2px 7px; font-size: 10px; font-weight: 600; }
+
     #graph { width: 100vw; height: 100vh; }
     svg { width: 100%; height: 100%; }
   </style>
 </head>
 <body>
 
+<!-- ── Header ── -->
 <div id="header">
   <div class="logo">⬡ CodeMap</div>
   <div class="stat-pill"><div class="stat-dot" style="background:#5e9bde"></div><strong>${stats.totalFiles}</strong>&nbsp;files</div>
@@ -274,18 +332,22 @@ export class ProjectGraphPanel {
   <div class="stat-pill"><div class="stat-dot" style="background:#fb923c"></div><strong>${stats.totalCalls}</strong>&nbsp;cross-file calls</div>
   ${stats.parseErrors > 0 ? `<div class="stat-pill"><div class="stat-dot" style="background:#f87171"></div><strong>${stats.parseErrors}</strong>&nbsp;errors</div>` : ''}
   <button id="onboarding-btn">🎯 Onboarding Path</button>
+  <button id="heatmap-btn">🌡 Heatmap</button>
 </div>
 
+<!-- ── Search ── -->
 <div id="search-wrap">
   <input id="search" type="text" placeholder="🔍  Search file or function…" />
 </div>
 
+<!-- ── Zoom Controls ── -->
 <div id="controls">
   <button class="ctrl-btn" id="zoom-in">+</button>
   <button class="ctrl-btn" id="zoom-out">−</button>
   <button class="ctrl-btn" id="zoom-fit">⊡</button>
 </div>
 
+<!-- ── Folder Legend ── -->
 <div id="legend">
   <h4>Folders</h4>
   <div id="legend-items"></div>
@@ -304,6 +366,18 @@ export class ProjectGraphPanel {
   </div>
 </div>
 
+<!-- ── Heatmap Legend ── -->
+<div id="heatmap-legend">
+  <h4>Complexity Score</h4>
+  <div class="heat-scale">
+    <span class="heat-label">Low</span>
+    <div class="heat-bar"></div>
+    <span class="heat-label">High</span>
+  </div>
+  <div style="font-size:10px;color:#475569;">connections + functions count</div>
+</div>
+
+<!-- ── Onboarding Panel ── -->
 <div id="onboarding-panel">
   <div id="onboarding-header">
     <div id="onboarding-header-row">
@@ -315,6 +389,7 @@ export class ProjectGraphPanel {
   <div id="onboarding-steps"></div>
 </div>
 
+<!-- ── Tooltip ── -->
 <div id="tooltip">
   <div class="tt-type" id="tt-type"></div>
   <div class="tt-name" id="tt-name"></div>
@@ -326,12 +401,12 @@ export class ProjectGraphPanel {
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
 <script>
-// ── Data injected from extension ──────────────────────────
-const RAW          = ${graphDataJson};
-const legendData   = ${legendJson};
+// ── Injected data ─────────────────────────────────────────
+const RAW            = ${graphDataJson};
+const legendData     = ${legendJson};
 const onboardingPath = ${onboardingJson};
 
-// ── Legend ────────────────────────────────────────────────
+// ── Populate folder legend ────────────────────────────────
 const legendEl = document.getElementById('legend-items');
 legendData.forEach(function(item) {
   const row = document.createElement('div');
@@ -341,7 +416,7 @@ legendData.forEach(function(item) {
   legendEl.appendChild(row);
 });
 
-// ── Onboarding step list ──────────────────────────────────
+// ── Populate onboarding steps ─────────────────────────────
 const stepsEl = document.getElementById('onboarding-steps');
 onboardingPath.forEach(function(step) {
   const el = document.createElement('div');
@@ -360,12 +435,13 @@ onboardingPath.forEach(function(step) {
   stepsEl.appendChild(el);
 });
 
-// ── SVG setup ─────────────────────────────────────────────
+// ── SVG + Zoom setup ──────────────────────────────────────
 const W = window.innerWidth;
 const H = window.innerHeight - 52;
 const svg = d3.select('#graph').append('svg');
 const defs = svg.append('defs');
 
+// Glow filter
 const glow = defs.append('filter').attr('id', 'glow')
   .attr('x', '-60%').attr('y', '-60%').attr('width', '220%').attr('height', '220%');
 glow.append('feGaussianBlur').attr('in', 'SourceGraphic').attr('stdDeviation', '5').attr('result', 'blur');
@@ -373,6 +449,7 @@ const gm = glow.append('feMerge');
 gm.append('feMergeNode').attr('in', 'blur');
 gm.append('feMergeNode').attr('in', 'SourceGraphic');
 
+// Arrow marker
 defs.append('marker').attr('id', 'arrow-call')
   .attr('viewBox', '0 -5 10 10').attr('refX', 18).attr('refY', 0)
   .attr('markerWidth', 5).attr('markerHeight', 5).attr('orient', 'auto')
@@ -382,24 +459,24 @@ const zoomBehavior = d3.zoom().scaleExtent([0.04, 5]).on('zoom', function(e) {
   container.attr('transform', e.transform);
 });
 svg.call(zoomBehavior);
-
 const container = svg.append('g');
 
+// Deep copy so D3 can mutate
 const nodes = RAW.nodes.map(function(d) { return Object.assign({}, d); });
 const links = RAW.links.map(function(d) { return Object.assign({}, d); });
 
-// ── Simulation ────────────────────────────────────────────
+// ── Force simulation ──────────────────────────────────────
 const simulation = d3.forceSimulation(nodes)
   .force('link', d3.forceLink(links).id(function(d) { return d.id; })
     .distance(function(l) { return l.type === 'contains' ? 65 : 220; })
-    .strength(function(l) { return l.type === 'contains' ? 0.85 : 0.12; }))
+    .strength(function(l)  { return l.type === 'contains' ? 0.85 : 0.12; }))
   .force('charge', d3.forceManyBody()
     .strength(function(d) { return d.type === 'file' ? -900 : -130; }))
   .force('center', d3.forceCenter(W / 2, H / 2))
   .force('collision', d3.forceCollide(function(d) { return d.type === 'file' ? 52 : 20; }))
   .alphaDecay(0.022);
 
-// ── Links ─────────────────────────────────────────────────
+// ── Draw links ────────────────────────────────────────────
 const linkSel = container.append('g')
   .selectAll('path').data(links).join('path')
   .attr('fill', 'none')
@@ -409,7 +486,7 @@ const linkSel = container.append('g')
   .attr('opacity', function(d) { return d.type === 'contains' ? 0.4 : 0.4; })
   .attr('marker-end', function(d) { return d.type === 'calls' ? 'url(#arrow-call)' : null; });
 
-// ── Nodes ─────────────────────────────────────────────────
+// ── Draw nodes ────────────────────────────────────────────
 const nodeSel = container.append('g')
   .selectAll('g').data(nodes).join('g')
   .style('cursor', 'pointer')
@@ -422,15 +499,15 @@ const nodeSel = container.append('g')
 // File nodes
 nodeSel.filter(function(d) { return d.type === 'file'; }).each(function(d) {
   const g = d3.select(this);
-  g.append('circle').attr('r', 30).attr('fill', d.color).attr('opacity', 0.10).attr('filter', 'url(#glow)');
+  g.append('circle').attr('r', 30).attr('fill', d.color).attr('opacity', 0.10).attr('filter', 'url(#glow)').attr('class', 'glow-ring');
   g.append('circle').attr('r', 22).attr('fill', '#151524').attr('stroke', d.color).attr('stroke-width', 2.5).attr('class', 'main-ring');
-  g.append('circle').attr('r', 5).attr('fill', d.color).attr('opacity', 0.9);
+  g.append('circle').attr('r', 5).attr('fill', d.color).attr('opacity', 0.9).attr('class', 'inner-dot');
   g.append('text').attr('dy', 36).attr('text-anchor', 'middle')
     .attr('font-size', '10.5px').attr('font-weight', '600').attr('fill', '#e2e8f0').attr('pointer-events', 'none')
     .text(d.label.length > 16 ? d.label.slice(0,15)+'…' : d.label);
   if (d.fnCount > 0) {
     g.append('text').attr('dy', 48).attr('text-anchor', 'middle')
-      .attr('font-size', '9px').attr('fill', d.color).attr('opacity', 0.65).attr('pointer-events', 'none')
+      .attr('font-size', '9px').attr('fill', d.color).attr('opacity', 0.65).attr('pointer-events', 'none').attr('class', 'fn-count-label')
       .text(d.fnCount + ' fn' + (d.fnCount !== 1 ? 's' : ''));
   }
 });
@@ -458,14 +535,24 @@ nodeSel
     ttType.textContent = d.type === 'file' ? '📄 File' : '⚡ Function';
     ttType.style.color = d.color;
     ttName.textContent = d.label;
+
     if (d.type === 'file') {
-      ttMeta.textContent = 'Folder: ' + (d.group === 'root' ? '/' : d.group);
-      ttBadge.innerHTML = '<span class="tt-badge" style="background:' + d.color + '22;color:' + d.color + '">' + d.fnCount + ' functions</span>';
+      let metaHTML = 'Folder: ' + (d.group === 'root' ? '/' : d.group);
+      if (heatmapActive) {
+        metaHTML += '<br><span style="color:#fb923c;">⚡ Complexity: ' + (d.complexity || 0) + '</span>'
+          + '<br><span style="color:#64748b;font-size:10px;">'
+          + (d.fanIn || 0) + ' callers · ' + (d.fanOut || 0) + ' outgoing · ' + (d.fnCount || 0) + ' fns</span>';
+      }
+      ttMeta.innerHTML = metaHTML;
+      ttBadge.innerHTML = '<span class="tt-badge" style="background:' + d.color + '22;color:' + d.color + '">'
+        + d.fnCount + ' function' + (d.fnCount !== 1 ? 's' : '') + '</span>';
     } else {
       ttMeta.textContent = 'In: ' + (d.file ? d.file.split('/').pop() : '');
       ttBadge.innerHTML = '';
     }
     tooltip.style.opacity = '1';
+
+    // Dim unconnected nodes
     const connected = new Set([d.id]);
     links.forEach(function(l) {
       const s = l.source.id || l.source;
@@ -501,7 +588,7 @@ simulation.on('tick', function() {
   nodeSel.attr('transform', function(d) { return 'translate(' + d.x + ',' + d.y + ')'; });
 });
 
-// ── Zoom controls ─────────────────────────────────────────
+// ── Zoom buttons ──────────────────────────────────────────
 document.getElementById('zoom-in').onclick  = function() { svg.transition().duration(300).call(zoomBehavior.scaleBy, 1.4); };
 document.getElementById('zoom-out').onclick = function() { svg.transition().duration(300).call(zoomBehavior.scaleBy, 0.7); };
 document.getElementById('zoom-fit').onclick = function() {
@@ -526,7 +613,7 @@ let onboardingActive = false;
 const onboardingPanel = document.getElementById('onboarding-panel');
 const onboardingBtn   = document.getElementById('onboarding-btn');
 
-// Click step row → pan graph to that file node
+// Step click → pan to file node
 document.querySelectorAll('.step-item').forEach(function(el) {
   el.addEventListener('click', function() {
     const fileName = el.querySelector('.step-filename').textContent;
@@ -536,58 +623,42 @@ document.querySelectorAll('.step-item').forEach(function(el) {
       zoomBehavior.transform,
       d3.zoomIdentity.translate(W/2 - target.x * 1.3, H/2 - target.y * 1.3).scale(1.3)
     );
-    // Flash the node ring
     nodeSel.filter(function(n) { return n.id === target.id; })
       .select('.main-ring')
       .transition().duration(150).attr('r', 30).attr('stroke-width', 4)
       .transition().duration(150).attr('r', 22).attr('stroke-width', 2.5);
-    // Highlight active step
     document.querySelectorAll('.step-item').forEach(function(s) { s.classList.remove('active'); });
     el.classList.add('active');
   });
 });
 
 function animateTrail(show) {
-  // Clear all badges and highlights first
   nodeSel.selectAll('.order-badge').remove();
   nodeSel.select('.main-ring')
     .attr('stroke', function(d) { return d.color; })
     .attr('stroke-width', 2.5);
-  document.querySelectorAll('.step-item').forEach(function(el) {
-    el.classList.remove('active');
-  });
-
+  document.querySelectorAll('.step-item').forEach(function(el) { el.classList.remove('active'); });
   if (!show) return;
 
   onboardingPath.forEach(function(step, i) {
     setTimeout(function() {
       const target = nodes.find(function(n) { return n.type === 'file' && n.label === step.fileName; });
       if (!target) return;
-
-      // Highlight the ring purple
       nodeSel.filter(function(n) { return n.id === target.id; })
-        .select('.main-ring')
-        .attr('stroke', '#a78bfa')
-        .attr('stroke-width', 3.5);
-
-      // Add numbered badge
+        .select('.main-ring').attr('stroke', '#a78bfa').attr('stroke-width', 3.5);
       nodeSel.filter(function(n) { return n.id === target.id; }).each(function() {
         const g = d3.select(this);
         g.selectAll('.order-badge').remove();
         const badge = g.append('g').attr('class', 'order-badge');
         badge.append('circle').attr('cx', 18).attr('cy', -18).attr('r', 11).attr('fill', '#a78bfa');
         badge.append('text')
-          .attr('x', 18).attr('y', -13)
-          .attr('text-anchor', 'middle')
+          .attr('x', 18).attr('y', -13).attr('text-anchor', 'middle')
           .attr('font-size', '10px').attr('font-weight', '800')
           .attr('fill', '#0f0f1a').attr('pointer-events', 'none')
           .text(step.order);
       });
-
-      // Highlight step row in panel
       const stepEl = document.getElementById('step-' + step.order);
       if (stepEl) { stepEl.classList.add('active'); }
-
     }, i * 250);
   });
 }
@@ -598,12 +669,78 @@ onboardingBtn.addEventListener('click', function() {
   onboardingBtn.classList.toggle('active', onboardingActive);
   animateTrail(onboardingActive);
 });
-
 document.getElementById('close-onboarding').addEventListener('click', function() {
   onboardingActive = false;
   onboardingPanel.classList.remove('open');
   onboardingBtn.classList.remove('active');
   animateTrail(false);
+});
+
+// ── Complexity Heatmap ────────────────────────────────────
+let heatmapActive = false;
+const heatmapBtn    = document.getElementById('heatmap-btn');
+const heatmapLegend = document.getElementById('heatmap-legend');
+
+const fileNodes = nodes.filter(function(n) { return n.type === 'file'; });
+const scores    = fileNodes.map(function(n) { return n.complexity || 0; });
+const minScore  = Math.min.apply(null, scores);
+const maxScore  = Math.max.apply(null, scores);
+
+function normalizeScore(score) {
+  if (maxScore === minScore) return 0.5;
+  return (score - minScore) / (maxScore - minScore);
+}
+
+// green (#34d399) → yellow (#facc15) → red (#f87171)
+function heatColor(t) {
+  if (t < 0.5) {
+    var t2 = t * 2;
+    var r = Math.round(52  + (250 - 52)  * t2);
+    var g = Math.round(211 + (204 - 211) * t2);
+    var b = Math.round(153 + (21  - 153) * t2);
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+  } else {
+    var t2 = (t - 0.5) * 2;
+    var r = Math.round(250 + (241 - 250) * t2);
+    var g = Math.round(204 + (113 - 204) * t2);
+    var b = Math.round(21  + (113 - 21)  * t2);
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+  }
+}
+
+// Scale radius 18–40 based on complexity
+function heatRadius(score) {
+  var t = normalizeScore(score);
+  return 18 + t * 22;
+}
+
+function applyHeatmap(active) {
+  nodeSel.filter(function(d) { return d.type === 'file'; }).each(function(d) {
+    var g   = d3.select(this);
+    var t   = normalizeScore(d.complexity || 0);
+    var col = heatColor(t);
+    var rad = heatRadius(d.complexity || 0);
+
+    if (active) {
+      g.select('.glow-ring').transition().duration(500).attr('r', rad + 10).attr('fill', col).attr('opacity', 0.18);
+      g.select('.main-ring').transition().duration(500).attr('r', rad).attr('stroke', col).attr('stroke-width', 3);
+      g.select('.inner-dot').transition().duration(500).attr('fill', col).attr('r', 6);
+      // Update fn count label color
+      g.select('.fn-count-label').attr('fill', col);
+    } else {
+      g.select('.glow-ring').transition().duration(500).attr('r', 30).attr('fill', d.color).attr('opacity', 0.10);
+      g.select('.main-ring').transition().duration(500).attr('r', 22).attr('stroke', d.color).attr('stroke-width', 2.5);
+      g.select('.inner-dot').transition().duration(500).attr('fill', d.color).attr('r', 5);
+      g.select('.fn-count-label').attr('fill', d.color);
+    }
+  });
+}
+
+heatmapBtn.addEventListener('click', function() {
+  heatmapActive = !heatmapActive;
+  heatmapBtn.classList.toggle('active', heatmapActive);
+  heatmapLegend.style.display = heatmapActive ? 'block' : 'none';
+  applyHeatmap(heatmapActive);
 });
 </script>
 </body>
